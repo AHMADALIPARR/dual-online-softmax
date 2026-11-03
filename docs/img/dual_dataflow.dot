@@ -1,0 +1,44 @@
+# SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SnapKitty-Opaque-1.0
+# Copyright Ahmad Ali Parr
+# Dataflow of fa_dual_online_softmax. Render: dot -Tsvg dual_dataflow.dot -o dual_dataflow.svg
+digraph dual_online_softmax {
+    rankdir=LR;
+    node [shape=box, style="rounded,filled", fillcolor="#f4f4f4", fontname="Helvetica", fontsize=11];
+    edge [fontname="Helvetica", fontsize=9];
+
+    tiles   [label="tile stream\n(row, tile_max, BC logits, nkeys)", shape=parallelogram, fillcolor="#e8eef8"];
+    disp    [label="dispatch\nping-pong per row\n(row r: first tile -> lane r%2)", fillcolor="#e8eef8"];
+
+    subgraph cluster_l0 {
+        label="lane 0"; style=dashed; color="#7a7a7a";
+        f0  [label="tile FIFO"];
+        s0  [label="sequencer\nm_new = max(m, tile_max)\nlazy: alpha only if m moved"];
+        e0  [label="fa_exp_approx\n(phantom logit + p)", fillcolor="#fff2cc"];
+        r0  [label="m0[BR], l0[BR]\nsingle write port:\nl <- 0 (alpha)  |  l + p + fold", fillcolor="#d9ead3"];
+    }
+    subgraph cluster_l1 {
+        label="lane 1"; style=dashed; color="#7a7a7a";
+        f1  [label="tile FIFO"];
+        s1  [label="sequencer\nm_new = max(m, tile_max)\nlazy: alpha only if m moved"];
+        e1  [label="fa_exp_approx\n(phantom logit + p)", fillcolor="#fff2cc"];
+        r1  [label="m1[BR], l1[BR]\nsingle write port:\nl <- 0 (alpha)  |  l + p + fold", fillcolor="#d9ead3"];
+    }
+
+    resc [label="shared rescaler\nround-robin, 1 multiplier\nfold = (l_prev * alpha) >> 16", fillcolor="#f8d7da"];
+    merge [label="fa_softmax_merge\nm = max(m0, m1)\nbeta = exp(-(m_hi - m_lo))\nl = (l_lo * beta >> 16) + l_hi", fillcolor="#e8eef8"];
+    oacc [label="O accumulators o0, o1\n(ev_* streams)", shape=parallelogram, fillcolor="#e8eef8"];
+    out  [label="merge_l, merge_m\no_out = o0*beta0 + o1*beta1", shape=parallelogram, fillcolor="#e8eef8"];
+
+    tiles -> disp;
+    disp -> f0 [label="even"]; disp -> f1 [label="odd"];
+    f0 -> s0 -> e0; f1 -> s1 -> e1;
+    e0 -> r0 [label="p"]; e1 -> r1 [label="p"];
+    e0 -> resc [label="alpha + l snapshot", color="#b03030"];
+    e1 -> resc [label="alpha + l snapshot", color="#b03030"];
+    resc -> r0 [label="fold (deferred)", color="#b03030"];
+    resc -> r1 [label="fold (deferred)", color="#b03030"];
+    r0 -> s0 [label="m", style=dotted]; r1 -> s1 [label="m", style=dotted];
+    e0 -> oacc [style=dashed]; e1 -> oacc [style=dashed];
+    r0 -> merge; r1 -> merge; oacc -> merge [style=dashed];
+    merge -> out;
+}
